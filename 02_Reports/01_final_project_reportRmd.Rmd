@@ -1,0 +1,502 @@
+---
+title: "State Clustering Project"
+author: "Chris Selig"
+date: "29/06/2019"
+output: 
+    tufte::tufte_book: default
+    link-citations: yes
+---
+
+```{r setup, include=FALSE}
+# Set up defaults for rmd document
+knitr::opts_chunk$set(
+  echo = FALSE,
+  eval = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  #fig.align = 'center',
+  fig.height = 3,
+  fig.weight =3,
+  out.width = '100%',
+  dpi = 300
+  )
+```
+
+
+```{r loadLibraries}
+# Load the libraries ----
+library(tidyverse)
+library(readxl)
+library(kableExtra)
+library(psych)
+library(ggrepel)
+library(tufte)
+library(ggthemes)
+library(ggExtra)
+library(cowplot)
+library(factoextra)
+library(cluster)
+library(mclust)
+library(fpc)
+library(ape)
+```
+
+```{r sourceFunctions}
+# Load functions used throughout report
+source('../01_Scripts/03_plotting_functions.R')
+source('../01_Scripts/01_data_wrangling_functions.R')
+```
+
+
+```{r loadData}
+# Load the data ----
+arrests_raw_tbl <- read_excel('../00_Data/USArrests.xlsx')
+```
+
+```{r dataManipulation}
+# Data manipulation
+arrests_tbl <- arrests_tbl_function(data = arrests_raw_tbl)
+
+arrests_stats_tbl <- arrests_stats_function(data = arrests_tbl)
+```
+
+## Problem Statement
+
+As part of an ongoing effort to reduce homicide rates and to focus discussion between the 50 states, the task is to group related states into a small number of groups to help facilitate discussions.
+
+## The Data
+
+The data provided includes the homicide (murder), assault, and rape rates per 100,000 people. The final variable in the data set is the percentage of a states population that lives in an urban area. Below is a sample of the data.
+
+
+```{r table1}
+head(arrests_raw_tbl) %>% 
+    rename(
+        State = state,
+        `% Urban Population` = UrbanPop
+    ) %>% 
+  select(State, Murder, Assault, Rape, `% Urban Population`) %>% 
+  
+    kable(format = 'pandoc', align = 'c', caption = 'Sample of State Data')
+```
+
+A more thorough exploration of the data can be found in the appendix, under "Exploratory Data Analysis."
+
+## Recommendation
+
+The recommended grouping is provided by the hierarchical clustering algorithm. The three cluster solution has the highest silhouette coefficients of the three methods (k-means, hierarchical, and finite mixture models) explored. 
+
+```{r}
+# Compute the distance matrix
+edist <-arrests_raw_tbl %>% 
+    select(-state) %>% 
+    dist(method = 'euclidean', diag = TRUE)
+
+# Create the hierarchical cluster
+hclst <- edist %>% 
+    hclust(method = 'average')
+
+```
+
+```{r fig.cap='Summary Statistics'}
+cuts <- cutree(hclst, k = 3) %>% 
+  enframe() %>% 
+  rename(cluster = value) %>% 
+  cbind(arrests_raw_tbl) %>% 
+  select(-name)
+  
+cuts_mean <- cuts %>%  
+  select(-state) %>% 
+  gather(key = 'key', value = 'value',Murder:Rape) %>% 
+  group_by(cluster,key) %>% 
+  summarize(clus_mean = mean(value)) %>% 
+  ungroup() %>% 
+  mutate(
+    cluster = as_factor(cluster),
+    key = as_factor(key)
+    ) %>% 
+  mutate(clus_mean = log10(clus_mean))
+```
+
+```{r fig.cap='Cluster Classification', fig.height=1.5}
+cuts_mean %>% 
+  ggplot(aes(x = key,y = clus_mean,group = cluster, colour = cluster)) +
+  geom_point(size = 1) +
+  geom_line() +
+  theme_tufte() +
+  labs(x = '',y = 'Log Mean') 
+```
+
+
+Above, the results of the chosen algorithm. The clusters can be characteried as follows:
+
+Cluster 1: Has the highest amount of violent crimes (assault, murder, rape) of the four clusters, but is only the second highest percentage of ubran population. Sixteen states are assigned to this cluster.
+
+Cluster 2: Characterized by the highest percentage of urban population and has the second smallest values for the other variables. Fourteen states are assigned to this cluster.
+
+Cluster 3: Cluster three is the more rural of the three clusters and has the least amount  violent crime of all the clusters. This cluster has the largest amount of states (20) of the three clusters.
+
+Here are the states assigned to each cluster:
+
+```{r}
+cluster1_states <- cuts %>% 
+  select(cluster,state) %>% 
+  filter(cluster == 1) %>% 
+  select(-cluster) %>% 
+  rename(`Cluster 1` = state) 
+
+cluster2_states <- cuts %>% 
+  select(cluster,state) %>% 
+  filter(cluster == 2)%>% 
+  select(-cluster) %>% 
+  rename(`Cluster 2` = state) 
+
+cluster3_states <- cuts %>% 
+  select(cluster,state) %>% 
+  filter(cluster == 3)%>% 
+  select(-cluster) %>% 
+  rename(`Cluster 3` = state) 
+
+
+```
+
+```{r}
+kable(format = 'pandoc',list(cluster1_states,cluster2_states,cluster3_states))
+```
+
+## Methodology
+
+### Preferred Cluster Solution
+
+### Hierarchical Clustering
+
+As a first pass at hierarchical clustering, I calculated the dendrogram below using euclidean distance and the average linkage method. Below is the result.
+
+```{r}
+
+fviz_dend(hclst,cex = 0.5, horiz = TRUE) +
+  theme_tufte()
+```
+
+A dendrogram in this format is difficult to interpret with all the clusters, so a decision needs to be made on what the optimal number of clusters are. 
+
+```{r hierarchicalElbow, fig.margin = TRUE}
+# Elbow method
+arrests_raw_tbl %>% 
+  fviz_nbclust(hcut, method = "wss") +
+  geom_vline(xintercept = 4, linetype = 2)+
+  theme_tufte() +
+  labs(subtitle = "Elbow method")
+```
+
+At right, a common method to pick the optimal number of clusters is the "elbow method." The elbow method attempts to minimize the total within cluster sum of squares (WSS) so that adding another cluster does not add too much to the WSS. This results in a bend or "elbow" in the plot. You can see a bend at four clusters. Although, it looks like a three cluster or a 5 cluster solutions is also worth exploring.
+
+Below is the refined dendrogram showing the four clusters by color.
+
+```{r}
+k_colors = c('#5085A5','#687864','#31708E','#8FC1E3','#8FBC8F')
+fviz_dend(hclst,k = 4,cex = 0.5,k_colors = k_colors,horiz = TRUE) +
+  theme_tufte() +
+  labs(
+    title = 'Cluster Diagram with Four Clusters'
+  )
+```
+
+Ultimately, the question is how well do the clusters fit the data? One way to answer this is calculate internal validation methods: compactness (how close data points are within a cluster); separation (how far clusters are from each other). The silhouette coefficent will be used to assess the clusters.
+
+In the silhouette plot below, the silhouette coefficents for each data point are shown. There are a few notes of interest. First, the overall average silhouette width is only 0.5. Optimally this number should be as close to 1 as possible. Second, in cluster 1, there are some points with a negative silhouette coefficent. This means that the data points are most likely in the wrong cluster.
+
+```{r fig.height=2, fig.cap='Four Cluster Silhouette Width Plot'}
+hc.res <- arrests_raw_tbl %>% 
+  select(-state) %>% 
+  eclust("hclust", k = 4, hc_metric = 'euclidean',hc_method = 'average', graph = FALSE)
+
+fviz_silhouette(hc.res,
+                print.summary = FALSE,
+                palette = k_colors,
+                ggtheme = theme_tufte())
+
+silhouette_raw <- hc.res$silinfo
+
+
+```
+
+Taking a look at the average silhouette for each cluster (below), you can see that all of the average widths are pretty low.
+
+```{r silhouetteCoefficents,fig.margin = TRUE, fig.cap='Cluster Silhouette Coefficents'}
+silhouette_raw$clus.avg.widths %>% 
+  enframe() %>% 
+  mutate(Cluster = str_glue('Cluster {name}') %>% as.factor()) %>% 
+  select(-name) %>% 
+  rename(`Avg Silhouette Width` = value) %>% 
+  select(Cluster,everything()) %>% 
+  kable(format = 'pandoc')
+```
+
+Can we do better? Let's try with a three cluster solution instead. Below is the silhouette plot for the 3 cluster solution. With an average silhouette width of 0.53, a better result has been obtained. Also of note, the negative silhouette coefficents have been eliminated.
+
+```{r fig.height=2, fig.cap='Three Cluster Silhouette Width'}
+hc.res <- arrests_raw_tbl %>% 
+  select(-state) %>% 
+  eclust("hclust", k = 3, hc_metric = 'euclidean',hc_method = 'average', graph = FALSE)
+
+fviz_silhouette(hc.res,
+                print.summary = FALSE,
+                palette = k_colors,
+                ggtheme = theme_tufte())
+
+silhouette_raw <- hc.res$silinfo
+
+
+```
+
+## Alternative Cluster Models
+
+### K-Means Clustering
+
+K-means clustering is an unsupervised learning technique used to group similar data points together. The number of clusters are manually defined and data points are put in the clusters in a way to minimize the in cluster sum of squares. To begin, a couple of decisions need to be made:
+
+1. Whether or not to scale the data: Since the assault variable is quite a bit larger than the others variables, I will scale them.
+
+2. The number of clusters: To do this, another elbow plot will be created using the kmeans algorithm. At right, are the results of the elbow method. After 4 clusters the slope is not very steep so on the first try of the algorithm I will use the four clusters.
+
+```{r kmeansElbow, fig.margin = TRUE, fig.cap='Kmeans Elbow Method'}
+set.seed(123456789)
+arrests_raw_tbl %>% 
+  select(-state) %>% 
+  fviz_nbclust(kmeans, method = "wss") +
+  geom_vline(xintercept = 4, linetype = 2)+
+  theme_tufte()+
+  labs(subtitle = "Elbow method")
+```
+
+Below is the results of the kmeans clustering algorithm. Remember, the goal is to have well defined clusters with maximized space between them. Clusters 2 and 3, especially, appear to be potentially the same cluster and more generally, there is quite a bit of overlap between the four clusters.
+
+
+```{r fig.cap='Kmeans Four Cluster Solution', fig.height=2}
+set.seed(123456789)
+
+km.res <- arrests_raw_tbl %>% 
+  mutate_at(2:5,funs(c(scale(.)))) %>% 
+  select(-state) %>% 
+  eclust("kmeans", k = 4, nstart = 5000, graph = FALSE)
+
+fviz_cluster(km.res, geom = 'point', ellipse.type = 'norm',
+             palette = k_colors,
+             ggtheme = theme_tufte()
+)
+
+
+```
+
+To confirm that the kmeans clustering algorithm did not do a very good job at clustering the variables, below is the silhouette plot. With an average silhouette width of 0.34, the algorithm performed significantly worse than the hierarchical clustering. Also of note, some of the data points in cluster 4 have a negative silhouette index so are probably in the wrong cluster. 
+
+```{r kmSilhouette,fig.cap='Kmeans Silhouette Width', fig.height=2}
+
+fviz_silhouette(km.res,
+                print.summary = FALSE,
+                palette = k_colors,
+                ggtheme = theme_tufte()
+                )
+
+```
+
+
+Finally, I wanted to try the 3 and 5 cluster solutions to see if those are any better. Turns out they are not. At right is the silhouette plots for the 3 and 5 cluster solutions. The average silhouette width for them is even worse.
+
+```{r kmeansSilhouettePlots, fig.margin = TRUE, fig.cap='Three and Five Cluster Solutions'}
+
+set.seed(123456789)
+
+km.res3 <- arrests_raw_tbl %>% 
+  mutate_at(2:5,funs(c(scale(.)))) %>% 
+  select(-state) %>% 
+  eclust("kmeans", k = 3, nstart = 5000, graph = FALSE)
+
+km3 <- fviz_silhouette(km.res3,
+                print.summary = FALSE,
+                palette = k_colors,
+                ggtheme = theme_tufte(),
+                subtitle = 'Three Cluster Solution'
+                )
+
+set.seed(123456789)
+
+km.res5 <- arrests_raw_tbl %>% 
+  mutate_at(2:5,funs(c(scale(.)))) %>% 
+  select(-state) %>% 
+  eclust("kmeans", k = 5, nstart = 5000, graph = FALSE)
+
+km5 <- fviz_silhouette(km.res5,
+                print.summary = FALSE,
+                palette = k_colors,
+                ggtheme = theme_tufte(),
+                subtitle = '5 Cluster Solution'
+                )
+
+plot_grid(km3,km5,ncol = 1)
+```
+
+### Finite Mixture Model
+
+Finite mixture models are a probablistic method of clustering data points. Below, two models are used based on having the lowest Bayesian Information Criterion (BIC).
+
+
+```{r}
+# Get the best models
+# bic_obj <- arrests_raw_tbl %>% 
+#   select(-state) %>% 
+#   mclustBIC()
+
+best_bic_obj <- arrests_raw_tbl %>% 
+  select(-state) %>% 
+  mclustBIC(modelNames = c("VEI","EEI"))
+  
+vei_mixed_model <- Mclust(arrests_raw_tbl %>% select(-state),x = best_bic_obj,modelNames = "VEI")
+
+eei_mixed_model <- Mclust(arrests_raw_tbl %>% select(-state),x = best_bic_obj,modelNames = "EEI")
+
+vei_stats <- cluster.stats(dist(arrests_raw_tbl %>% select(-state)), vei_mixed_model$classification)
+eei_stats <- cluster.stats(dist(arrests_raw_tbl %>% select(-state)), eei_mixed_model$classification)
+
+vei_avg_sil_width <- vei_stats$avg.silwidth
+eei_avg_sil_width <- eei_stats$avg.silwidth
+```
+
+The best two models are a "EEI" and "VEI" models. The three cluster EEI model is a diagonal model with equal volume and shape where a VEI model is diagonal, with varying volume and equal shape and has four clusters. Below is the silouette coefficents for the VEI model. The average silhousette width is 0.3744, which is better than the k-means clustering, but not has good as the hierarchical clustering.
+
+```{r}
+vei_stats_tbl <- vei_stats$clus.avg.silwidths %>%
+  enframe() %>% 
+  rename(
+    cluster = name,
+    `avg sil width` = value
+  ) %>% 
+  mutate(
+    label = str_glue("Avg Silhouette Width: {round(vei_avg_sil_width,4)}")
+  ) 
+
+vei_stats_tbl %>% select(-label) %>% 
+  kable(format = 'pandoc', caption = first(vei_stats_tbl$label))
+```
+
+The EEI model performed even worse than the VEI model. The average silhouette width for the clusters is only 0.2279. Even cluster one has a negative silhouette width which implies that the data points in the cluster probably below to a different cluster.
+
+```{r}
+eei_stats_tbl <- eei_stats$clus.avg.silwidths %>%
+  enframe() %>% 
+  rename(
+    cluster = name,
+    `avg sil width` = value
+  ) %>% 
+  mutate(
+    label = str_glue("Avg Silhouette Width: {round(eei_avg_sil_width,4)}")
+  ) 
+
+eei_stats_tbl %>% select(-label) %>% 
+  kable(format = 'pandoc', caption = first(eei_stats_tbl$label))
+```
+
+
+\pagebreak
+
+## Appendix
+
+### Exploratory Data Analysis
+
+### Summary Statistics
+
+
+```{r summaryStats}
+
+# Create summary table
+arrests_stats_tbl %>% 
+  select(variable:kurtosis) %>% 
+  kable(format = 'pandoc', align = 'c', caption = 'Summary Statistics')
+
+# Create variables for inline code chunks
+assaultMean <- arrests_stats_tbl %>% filter(variable == 'assault') %>% select(mean)
+assaultMedian <- arrests_stats_tbl %>% filter(variable == 'assault') %>% select(median)
+
+murderMean <- arrests_stats_tbl %>% filter(variable == 'murder') %>% select(mean)
+murderMedian <- arrests_stats_tbl %>% filter(variable == 'murder') %>% select(median)
+
+rapeMean <- arrests_stats_tbl %>% filter(variable == 'rape') %>% select(mean)
+rapeMedian <- arrests_stats_tbl %>% filter(variable == 'rape') %>% select(median)
+
+urbanPopMean <- arrests_stats_tbl %>% filter(variable == 'urbanpop') %>% select(mean)
+urbanPopMedian <- arrests_stats_tbl %>% filter(variable == 'urbanpop') %>% select(median)
+```
+
+`r newthought('Assault')`
+
+At right, the histogram for the assault variable. With 10 bins, the distribution is multi-modal as it has 3 distinct peaks and appears to have 3 clusters. Median `r {assaultMedian}` is less than the mean `r {assaultMean}` so the assault variable is right skewed. A positive skewness confirms this. Finally, with a negative excess kurtosis, this variable is platykurtic, meaning the data distribution is thin-tailed.
+
+```{r assaultHistograms, fig.margin = TRUE, fig.cap = "Assault"}
+histogram_function(variable = 'assault', buckets = 10)
+```
+
+`r newthought('Murder')`
+
+The murder histogram (at right) is bi-modal, with a long right tail suggesting at least 2 clusters. The median `r {murderMedian}` is less than the mean `r {murderMean}` so the murder variable is right skewed. A positive skewness confirms this. The murder variable also has a negative excess kurtosis and is thin-tailed.
+
+```{r murderHistograms, fig.margin = TRUE, fig.cap = "Murder"}
+histogram_function(variable = 'murder', buckets = 12)
+```
+
+`r newthought('Rape')`
+
+Median `r {rapeMedian}` is less than the mean `r {rapeMean}` so the rape variable is right skewed. A positive skewness value confirms this. The rape variable has a positive kurtosis and is leptokurtic, which means it is a fat tailed distribution. The histogram, at right shows the fat right tail and suggests 2 clusters.
+
+```{r rapeHistograms, fig.margin = TRUE, fig.cap = "Rape"}
+histogram_function(variable = 'rape', buckets = 12)
+```
+
+`r newthought('Urban Population')`
+
+At right is the histogram for the percentage of population in each state that is urban. As you can see it is bi-modal, with two distinct peaks as well as a a long left tail. The two peaks and long left tail suggest potentially 3 clusters. Median `r {urbanPopMedian}` is greater than the mean `r {urbanPopMean}` so the percentage of population that is urban variable is slightly left skewed. A negative skewness value confirms the left skew. As with assault and the murder variables, this variable also has a negative excess kurtosis so it is a thin tailed distribution.
+
+```{r urbanpopHistograms, fig.margin = TRUE, fig.cap = "Urban Population Percentage"}
+histogram_function(variable = 'urbanpop', buckets = 11)
+```
+
+
+
+## Outlier Detection
+
+Below, four boxplots are arranged to show a univariate approach to outlier detection. The dot in the middle of them is the median, while the horizontal lines begin at the 25th and 75th percentiles and extend to the end of the 1.5 * the IQR (interquartile range). Any dots outside of this range are tagged as outliers. Since there are no data points outside of the horizontal lines, no outliers are detected.
+
+```{r boxPlots, fig.height=5, fig.width=5}
+a <- boxplot_function(data = arrests_tbl, variable = 'murder')
+b <- boxplot_function(data = arrests_tbl, variable = 'assault')
+c <- boxplot_function(data = arrests_tbl, variable = 'rape')
+d <- boxplot_function(data = arrests_tbl, variable = 'urbanpop')
+
+plot_grid(a,NULL,b,c,NULL,d, ncol = 3)
+```
+
+Individually, none of the variables displayed any outliers, however, collectively, the variables should also be examined. To do this, the Cook's distance will be calculated. Cook's distance estimates the influence a data point using regression analysis. 
+
+```{r}
+sample_size <- nrow(arrests_raw_tbl)
+
+cooks_distance_measure <- 4/sample_size
+```
+
+
+At right, a multiple linear regression model has been fit with the data. The horizontal line is the Cook's distance, using the traditional 4/n criterion. In this case, everything above `r cooks_distance_measure` is an outlier. Three points are flagged: Mississippi, Vermont and North Dakota. Since the goal is to have all states at the discussion, it is inappropriate to remove them from the dataset (and the discussion groups).
+
+
+```{r, cooksDistancePlot, fig.cap = "Outlier Dection Using Cooks Distance",fig.margin = TRUE}
+mod <- lm(Murder ~ UrbanPop, data = arrests_raw_tbl)
+cooksd <- cooks.distance(mod)
+
+# Plot the Cook's Distance using the traditional 4/n criterion
+cooks_distance_plot_function(data = cooksd)
+```
+
+
+
+
+
+
